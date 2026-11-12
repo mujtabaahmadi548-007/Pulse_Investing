@@ -18,7 +18,7 @@
   --r:16px;
 }
 *{box-sizing:border-box}
-html,body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased}
+html,body{overflow-x:hidden;margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased}
 body{background:
   radial-gradient(900px 500px at 10% -10%, rgba(124,140,255,.13), transparent 60%),
   radial-gradient(800px 500px at 100% 0%, rgba(79,209,255,.08), transparent 60%), var(--bg);min-height:100vh}
@@ -51,10 +51,12 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
 .hcard svg{position:absolute;right:0;bottom:0;width:55%;height:48px;opacity:.9}
 
 /* LAYOUT */
+.layout>*,.col>*{min-width:0}
 .layout{display:grid;grid-template-columns:330px minmax(0,1fr) 400px;gap:16px;padding:16px 24px 24px}
-@media(max-width:1300px){.layout{grid-template-columns:1fr}}
+@media(max-width:1300px){.layout{grid-template-columns:1fr}.sticky{position:static;max-height:none}.sticky .scroll{max-height:none}}
+@media(max-width:700px){header{flex-wrap:wrap;padding:10px 14px;gap:8px}#clock{display:none}.hero,.layout{padding-left:12px;padding-right:12px}.hero{grid-template-columns:1fr 1fr;gap:10px}.hcard .p{font-size:20px}.big{font-size:40px}.stats{grid-template-columns:1fr 1fr}.stats div{padding:10px 16px}.detail{padding:18px}#tv{height:340px}.news.scroll{max-height:70vh}.row svg{width:48px}.row{grid-template-columns:30px minmax(0,1fr) 48px auto;padding:7px 12px}.tabs button{padding:6px 8px}.range .ends{font-size:10px}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);display:flex;flex-direction:column;min-height:0;overflow:hidden}
-.card-h{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
+.card-h{display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line)}
 .card-h h2{margin:0;font-size:14px;font-weight:600}
 .sub{font-size:11px;color:var(--faint)}
 .col{display:flex;flex-direction:column;gap:16px;min-height:0}
@@ -63,7 +65,8 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
 
 /* WATCHLIST */
 .grp{padding:12px 18px 6px;font-size:11px;font-weight:600;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
-.row{display:grid;grid-template-columns:34px 1fr 64px auto;align-items:center;gap:10px;padding:9px 18px;cursor:pointer;transition:background .15s}
+.wl{align-self:start}.wl .scroll{overflow:visible;flex:none}
+.row{display:grid;grid-template-columns:34px minmax(0,1fr) 56px auto;align-items:center;gap:10px;padding:7px 16px;cursor:pointer;transition:background .15s}
 .row:hover{background:var(--card-h)}
 .row.sel{background:rgba(124,140,255,.1)}
 .ico{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;font-size:11px;font-weight:700;background:var(--card-h);color:var(--muted)}
@@ -156,7 +159,7 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
 <div class="hero" id="hero"></div>
 
 <div class="layout">
-  <div class="card sticky">
+  <div class="card wl">
     <div class="card-h"><h2>Watchlist</h2><span class="sub">live trades</span></div>
     <div class="scroll" id="watch"></div>
   </div>
@@ -347,26 +350,30 @@ function flash(el, dir){ if(!dir) return; el.classList.remove('fu','fd'); void e
 
 /* ================= QUOTES (REST) ================= */
 let quotesRunning = false;
-async function loadQuotes(){
+async function retryQuotes(list){ if(quotesRunning){ setTimeout(()=>retryQuotes(list), 5000); return; } loadQuotes(list); }
+async function loadQuotes(list){
   if(quotesRunning) return; quotesRunning = true;
   try{
-    for(const a of ASSETS){
+    const failed = [];
+    for(const a of (list || ASSETS)){
       try{
         const q = await fh(`/quote?symbol=${encodeURIComponent(a.s)}`);
         if(q && q.c){
           const st = state[a.s] ||= {};
-          if(!st.lastTick) st.price = q.c;
-          Object.assign(st, {prev:q.pc, open:q.o, high:Math.max(st.high||0,q.h)||q.h, low:st.low?Math.min(st.low,q.l):q.l, qTime:q.t*1000});
+          if(!st.lastTick || q.t*1000 > st.lastTick) st.price = q.c;
+          Object.assign(st, {sessionBase:false, prev:q.pc, open:q.o, high:Math.max(st.high||0,q.h)||q.h, low:st.low?Math.min(st.low,q.l):q.l, qTime:q.t*1000});
           if(!st.spark || !st.spark.length){ st.spark = [q.pc, q.o, q.c].filter(Boolean); }
           markDirty(a.s);
         }
       }catch(e){
         if(String(e).includes('Invalid')) return;
         if(String(e).includes('Failed to fetch')){ setStatus('err','Network blocked — open this file directly in Chrome'); return; }
-        if(String(e).includes('Rate')) await sleep(5000);
+        if(String(e).includes('Rate')){ failed.push(a); await sleep(4000); continue; }
+        failed.push(a);
       }
-      await sleep(250);
+      await sleep(400);
     }
+    if(failed.length){ setTimeout(()=>retryQuotes(failed), 8000); }
   } finally { quotesRunning = false; }
 }
 
@@ -385,6 +392,7 @@ function connect(){
   };
   ws.onmessage = ev => {
     const m = JSON.parse(ev.data);
+    if(m.type==='error'){ setStatus('err','Live feed: ' + (m.msg||'error') + ' — close other Pulse tabs/devices'); return; }
     if(m.type!=='trade' || !m.data) return;
     if(!gotTrade){ gotTrade = true; setStatus('live','LIVE'); }
     const last = {};
@@ -591,7 +599,8 @@ function start(){
   if(!started){ started = true;
     setInterval(loadNews, 60000);
     setInterval(()=>{ if(newsTab==='top') showTop(); }, 30000); // re-rank as stories age
-    setInterval(loadQuotes, 5*60000); // refresh prev close / day stats
+    setInterval(()=>loadQuotes(), 5*60000); // refresh prev close / day stats
+    setInterval(()=>{ const stale = ASSETS.filter(a=>{ const s=state[a.s]; return !s || !s.price || (!s.lastTick || Date.now()-s.lastTick>90000); }).slice(0,8); if(stale.length) retryQuotes(stale); }, 60000); // REST fallback for symbols without live ticks
   }
 }
 renderShell(); setInterval(tickClock, 1000); tickClock(); start();
