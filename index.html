@@ -81,6 +81,8 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
 .chip{display:inline-block;font-size:11px;font-weight:600;padding:2px 7px;border-radius:6px;margin-top:3px}
 .chip.up{color:var(--up);background:var(--up-bg)} .chip.down{color:var(--down);background:var(--down-bg)}
 .chip.flat{color:var(--muted);background:var(--card-h)}
+.age{font-size:10px;font-weight:600;margin-right:4px}.age.live{color:var(--up)}.age.del{color:var(--gold)}.age.old{color:var(--faint)}
+.row.stale .v,.hcard.stale .p{opacity:.55}
 .fu{background:rgba(34,211,154,.28)!important}.fd{background:rgba(255,92,108,.28)!important}
 
 /* DETAIL */
@@ -203,7 +205,6 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
         <button data-n="latest" onclick="setNewsTab(this)">Latest</button>
         <button data-n="company" onclick="setNewsTab(this)" id="tabSel">Selected</button>
         <button data-n="wire" onclick="setNewsTab(this)">Live wire</button>
-        <button data-n="ai" onclick="setNewsTab(this)">✦ AI</button>
       </div>
     </div>
     <div class="sub" id="newsUpd" style="padding:8px 18px;border-bottom:1px solid var(--line)">Waiting for first check…</div>
@@ -349,18 +350,28 @@ function flush(){
     const row = $('w_'+rid(sym));
     if(row){
       const v = row.querySelector('.v'); v.textContent = fmt(st.price); flash(v, dir);
-      row.querySelector('.c').innerHTML = chipHtml(c);
+      row.querySelector('.c').innerHTML = ageHtml(st) + chipHtml(c);
+      row.classList.toggle('stale', !isFresh(st));
       row.querySelector('.sp').innerHTML = sparkSvg(st.spark, 64, 26, false);
     }
     const h = $('h_'+rid(sym));
     if(h){
       const p = h.querySelector('.p'); p.textContent = fmt(st.price); flash(p, dir);
-      h.querySelector('.c').innerHTML = chipHtml(c);
+      h.querySelector('.c').innerHTML = ageHtml(st) + chipHtml(c);
+      h.classList.toggle('stale', !isFresh(st));
       h.querySelector('.sp').innerHTML = sparkSvg(st.spark, 120, 48, true);
     }
     if(sym === selected.s) paintDetail(dir);
   }
   dirty.clear();
+}
+function isFresh(st){ return st && st.lastTick && Date.now()-st.lastTick < 60000; }
+function ageHtml(st){
+  if(!st || !st.price) return '';
+  if(isFresh(st)) return '<span class="age live">● LIVE</span>';
+  const t = Math.max(st.lastTick||0, st.qTime||0); if(!t) return '';
+  const m = (Date.now()-t)/60000;
+  return m < 20 ? `<span class="age del">${Math.max(1,Math.round(m))}m old</span>` : `<span class="age old">${ago(t)}</span>`;
 }
 function flash(el, dir){ if(!dir) return; el.classList.remove('fu','fd'); void el.offsetWidth; el.classList.add(dir>0?'fu':'fd'); setTimeout(()=>el.classList.remove('fu','fd'), 700); }
 
@@ -677,6 +688,7 @@ function start(){
   connect(); loadQuotes(); loadNews(); select(selected.s);
   if(!started){ started = true;
     setInterval(loadNews, 60000);
+    setInterval(()=>ASSETS.forEach(a=>state[a.s] && markDirty(a.s)), 10000); // keep LIVE / Xm old labels honest
     setInterval(()=>{ if(newsTab==='top') showTop(); }, 30000); // re-rank as stories age
     setInterval(()=>loadQuotes(), 5*60000); // refresh prev close / day stats
     setInterval(()=>{ const stale = ASSETS.filter(a=>{ if(a.noQuote) return false; const s=state[a.s]; return !s || !s.price || (!s.lastTick || Date.now()-s.lastTick>90000); }).slice(0,6); if(stale.length) retryQuotes(stale); }, 90000); // REST fallback for symbols without live ticks
