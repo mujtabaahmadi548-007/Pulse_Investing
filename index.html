@@ -38,6 +38,7 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
 .spacer{flex:1}
 .btn{background:var(--card);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;font:500 13px Inter,sans-serif;transition:.15s}
 .btn:hover{background:var(--card-h);border-color:var(--line2)}
+.btn.on{border-color:var(--accent);color:#aab4ff}
 .btn.primary{background:linear-gradient(135deg,var(--accent),#6a5cff);border:0;color:#fff}
 
 /* HERO STRIP */
@@ -153,10 +154,18 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
   <div class="pill" id="mktTxt"></div>
   <div class="spacer"></div>
   <div class="pill num" id="clock"></div>
+  <button class="btn" id="bkBtn" onclick="showBackupPanel(!backupShown)">Backup prices</button>
   <button class="btn" onclick="openSettings()">⚙ Settings</button>
 </header>
 
+<div id="tape" style="height:46px;border-bottom:1px solid var(--line)"></div>
 <div class="hero" id="hero"></div>
+<div id="backup" style="display:none;padding:16px 24px 0">
+  <div class="card">
+    <div class="card-h"><h2>Backup prices <span class="sub">· TradingView · no key needed · may be slightly delayed</span></h2><button class="btn" onclick="showBackupPanel(false)">Hide</button></div>
+    <div id="bkBox" style="height:520px"></div>
+  </div>
+</div>
 
 <div class="layout">
   <div class="card wl">
@@ -193,10 +202,12 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
         <button class="on" data-n="top" onclick="setNewsTab(this)">Top</button>
         <button data-n="latest" onclick="setNewsTab(this)">Latest</button>
         <button data-n="company" onclick="setNewsTab(this)" id="tabSel">Selected</button>
+        <button data-n="wire" onclick="setNewsTab(this)">Live wire</button>
         <button data-n="ai" onclick="setNewsTab(this)">✦ AI</button>
       </div>
     </div>
-    <div class="scroll news" id="news"><div class="empty">Add your Finnhub key in Settings to load news.</div></div>
+    <div class="sub" id="newsUpd" style="padding:8px 18px;border-bottom:1px solid var(--line)">Waiting for first check…</div>
+    <div class="scroll news" id="news" style="min-height:520px"><div class="empty">Add your Finnhub key in Settings to load news.</div></div>
   </div>
 </div>
 
@@ -208,6 +219,8 @@ header{display:flex;align-items:center;gap:18px;padding:14px 24px;position:stick
     <input id="kFinn" placeholder="Your Finnhub API key">
     <label>Gemini API key — optional, for ✦ AI brief (<a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a>)</label>
     <input id="kGem" placeholder="AIza…">
+    <label>Twelve Data API key — optional backup for prices (free at <a href="https://twelvedata.com/register" target="_blank">twelvedata.com</a>)</label>
+    <input id="kTd" placeholder="Used only when Finnhub fails">
     <label>Gemini model</label>
     <input id="kModel" placeholder="gemini-flash-latest">
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:20px">
@@ -261,13 +274,14 @@ const NEWS_RULES = [
 const TOP_SOURCES = /reuters|bloomberg|cnbc|wsj|wall street journal|financial times|marketwatch|associated press|barron/i;
 
 const API = 'https://finnhub.io/api/v1';
+let finnBlockedUntil = 0, finnFails = 0;
 const state = {}; // sym -> {price, prev, open, high, low, lastTick, qTime, spark:[]}
 let ws, selected = ASSETS[0], newsTab = 'top', seenNews = new Set(), firstNewsLoad = true, allNews = [];
 
 /* ================= HELPERS ================= */
 const $ = id => document.getElementById(id);
 function store(k, v){ try{ if(v===undefined) return localStorage.getItem(k); localStorage.setItem(k,v);}catch(e){ return null; } }
-const keys = () => ({finn: store('finnKey')||'', gem: store('gemKey')||'', model: store('gemModel')||'gemini-flash-latest'});
+const keys = () => ({finn: store('finnKey')||'', gem: store('gemKey')||'', model: store('gemModel')||'gemini-flash-latest', td: store('tdKey')||''});
 const dec = p => p>=1000 ? 2 : p>=1 ? 2 : 4;
 const fmt = n => n==null||isNaN(n) ? '—' : n.toLocaleString('en-US',{minimumFractionDigits:dec(n),maximumFractionDigits:dec(n)});
 const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -280,9 +294,11 @@ const chipHtml = c => !c ? '<span class="chip flat">—</span>' : `<span class="
 
 async function fh(path){
   const k = keys().finn; if(!k) throw new Error('No Finnhub key');
+  if(Date.now() < finnBlockedUntil) throw new Error('Rate limit (cooling down)');
   const r = await fetch(`${API}${path}${path.includes('?')?'&':'?'}token=${encodeURIComponent(k)}`);
-  if(r.status===401){ setStatus('err','Invalid Finnhub key — open Settings'); throw new Error('Invalid Finnhub key'); }
-  if(r.status===429) throw new Error('Rate limit');
+  if(r.status===401){ setStatus('err','Invalid Finnhub key — open Settings'); showBackupPanel(true); throw new Error('Invalid Finnhub key'); }
+  if(r.status===429){ finnBlockedUntil = Date.now() + 60000; if(++finnFails >= 2) showBackupPanel(true); throw new Error('Rate limit'); }
+  finnFails = 0;
   if(r.status===403) throw new Error('Not included in free plan');
   if(!r.ok) throw new Error('HTTP '+r.status);
   return r.json();
@@ -367,14 +383,66 @@ async function loadQuotes(list){
         }
       }catch(e){
         if(String(e).includes('Invalid')) return;
-        if(String(e).includes('Failed to fetch')){ setStatus('err','Network blocked — open this file directly in Chrome'); return; }
-        if(String(e).includes('Rate')){ failed.push(a); await sleep(4000); continue; }
+        if(String(e).includes('Failed to fetch')){ setStatus('err','Finnhub unreachable — showing backup prices'); showBackupPanel(true); return; }
+        if(String(e).includes('free plan')){ a.noQuote = true; continue; }   // e.g. OANDA quotes: never retry
+        if(String(e).includes('Rate')){ finnBlockedUntil = Date.now() + 60000; failed.push(...(list||ASSETS).slice((list||ASSETS).indexOf(a))); break; }
         failed.push(a);
       }
-      await sleep(400);
+      await sleep(700); // ~20 symbols in ~14s, well under 60/min with news
     }
-    if(failed.length){ setTimeout(()=>retryQuotes(failed), 8000); }
+    if(failed.length) backupQuotes(failed);
   } finally { quotesRunning = false; }
+}
+
+/* ---------- BACKUP PRICES 1: Twelve Data (optional free key) ---------- */
+const TD_MAP = s => s==='OANDA:XAU_USD' ? 'XAU/USD' : s==='BRK.B' ? 'BRK.B' : s.startsWith('OANDA:') ? null : s;
+let tdLast = 0;
+async function backupQuotes(list){
+  const k = keys().td; if(!k){ showBackupPanel(true); return; }
+  if(Date.now() - tdLast < 120000) return; // free plan: 800 credits/day, so max every 2 min
+  tdLast = Date.now();
+  const syms = list.map(a=>TD_MAP(a.s)).filter(Boolean).slice(0,8); // 8 credits/min on free plan
+  if(!syms.length) return;
+  try{
+    const r = await fetch(`https://api.twelvedata.com/quote?symbol=${encodeURIComponent(syms.join(','))}&apikey=${encodeURIComponent(k)}`);
+    let j = await r.json();
+    if(syms.length===1) j = {[syms[0]]: j};
+    for(const a of list){
+      const q = j[TD_MAP(a.s)]; if(!q || q.status==='error' || !q.close) continue;
+      const st = state[a.s] ||= {};
+      const t = (q.last_quote_at || q.timestamp) * 1000;
+      if(!st.lastTick || t > st.lastTick) st.price = +q.close;
+      Object.assign(st, {sessionBase:false, prev:+q.previous_close, open:+q.open, high:+q.high, low:+q.low, qTime:t, via:'Twelve Data'});
+      if(!st.spark || !st.spark.length) st.spark = [+q.previous_close, +q.open, +q.close];
+      markDirty(a.s);
+    }
+  }catch(e){ showBackupPanel(true); }
+}
+
+/* ---------- BACKUP PRICES 2: TradingView (no key at all) ---------- */
+function tvWidget(box, file, cfg){
+  box.innerHTML = '';
+  const w = document.createElement('div'); w.className='tradingview-widget-container'; w.style.height='100%';
+  const inner = document.createElement('div'); inner.className='tradingview-widget-container__widget'; inner.style.height='100%';
+  const sc = document.createElement('script'); sc.src = 'https://s3.tradingview.com/external-embedding/' + file; sc.async = true;
+  sc.textContent = JSON.stringify(cfg); w.append(inner, sc); box.appendChild(w);
+}
+let backupShown = false;
+function showBackupPanel(on){
+  if(on===backupShown) return; backupShown = on;
+  $('backup').style.display = on ? '' : 'none';
+  $('bkBtn').classList.toggle('on', on);
+  if(on) tvWidget($('bkBox'), 'embed-widget-market-quotes.js', {width:'100%', height:'100%', colorTheme:'dark', isTransparent:true, showSymbolLogo:true, locale:'en',
+    symbolsGroups:[
+      {name:'Commodities', symbols:[{name:'TVC:GOLD',displayName:'Gold'},{name:'TVC:USOIL',displayName:'WTI Oil'},{name:'TVC:UKOIL',displayName:'Brent Oil'},{name:'TVC:SILVER',displayName:'Silver'}]},
+      {name:'Indices', symbols:[{name:'FOREXCOM:SPXUSD',displayName:'S&P 500'},{name:'FOREXCOM:NSXUSD',displayName:'Nasdaq 100'},{name:'FOREXCOM:DJI',displayName:'Dow 30'}]},
+      {name:'Major stocks', symbols:ASSETS.filter(a=>a.g==='Major stocks').map(a=>({name:a.tv, displayName:a.name}))}
+    ]});
+}
+function tickerTape(){
+  tvWidget($('tape'), 'embed-widget-ticker-tape.js', {colorTheme:'dark', isTransparent:true, displayMode:'adaptive', showSymbolLogo:true, locale:'en',
+    symbols:[{proName:'FOREXCOM:SPXUSD',title:'S&P 500'},{proName:'FOREXCOM:NSXUSD',title:'Nasdaq 100'},{proName:'FOREXCOM:DJI',title:'Dow 30'},
+      {proName:'TVC:GOLD',title:'Gold'},{proName:'TVC:USOIL',title:'WTI'},{proName:'TVC:UKOIL',title:'Brent'},{proName:'TVC:DXY',title:'US Dollar'},{proName:'TVC:US10Y',title:'US 10Y'}]});
 }
 
 /* ================= LIVE WEBSOCKET ================= */
@@ -394,7 +462,7 @@ function connect(){
     const m = JSON.parse(ev.data);
     if(m.type==='error'){ setStatus('err','Live feed: ' + (m.msg||'error') + ' — close other Pulse tabs/devices'); return; }
     if(m.type!=='trade' || !m.data) return;
-    if(!gotTrade){ gotTrade = true; setStatus('live','LIVE'); }
+    if(!gotTrade){ gotTrade = true; setStatus('live','LIVE'); showBackupPanel(false); }
     const last = {};
     for(const t of m.data) last[t.s] = t;
     for(const s in last){
@@ -409,7 +477,7 @@ function connect(){
     }
   };
   ws.onerror = () => setStatus('err','Live feed error');
-  ws.onclose = () => { setStatus('err','Reconnecting…'); setTimeout(connect, Math.min(30000, 1000 * 2 ** retry++)); };
+  ws.onclose = () => { setStatus('err','Reconnecting…'); if(retry >= 2) showBackupPanel(true); setTimeout(connect, Math.min(30000, 1000 * 2 ** retry++)); };
 }
 function setStatus(cls, txt){ $('dot').className = 'dot ' + cls; $('statusTxt').textContent = txt; }
 
@@ -520,15 +588,24 @@ function showTop(){
   renderNewsList([...recent].sort((a,b)=>b.rank-a.rank), true);
 }
 function showLatest(){ renderNewsList([...allNews].sort((a,b)=>b.datetime-a.datetime), false); }
+let newsRound = 0;
 async function loadNews(){
   try{
-    const [gen, fx, mg] = await Promise.all([fh('/news?category=general'), fh('/news?category=forex'), fh('/news?category=merger').catch(()=>[])]);
-    const map = new Map();
-    for(const n of [...gen, ...fx, ...mg]) if(n.headline && !map.has(n.id)) map.set(n.id, scoreNews(n));
-    allNews = [...map.values()];
+    const cats = newsRound++ % 3 === 0 ? ['general','forex','merger'] : ['general'];
+    const res = await Promise.all(cats.map(c => fh('/news?category='+c).catch(e=>{ if(c==='general') throw e; return []; })));
+    const map = new Map(allNews.map(n=>[n.id, n]));
+    let added = 0;
+    for(const n of res.flat()) if(n.headline && !map.has(n.id)){ map.set(n.id, scoreNews(n)); added++; }
+    allNews = [...map.values()].map(n=>scoreNews(n)).filter(n=>Date.now()/1000 - n.datetime < 3*86400);
     if(newsTab==='top') showTop(); else if(newsTab==='latest') showLatest();
-    allNews.forEach(n=>seenNews.add(n.id)); firstNewsLoad = false;
-  }catch(e){ if(newsTab==='top'||newsTab==='latest') $('news').innerHTML = `<div class="empty">News error: ${esc(e.message)}</div>`; }
+    allNews.forEach(n=>seenNews.add(n.id));
+    const newest = allNews.reduce((m,n)=>Math.max(m,n.datetime),0);
+    $('newsUpd').textContent = `Checked ${new Date().toLocaleTimeString('en-GB')}` + (firstNewsLoad ? '' : added ? ` · ${added} new` : ' · nothing new') + (newest ? ` · newest ${ago(newest*1000)}` : '');
+    firstNewsLoad = false;
+  }catch(e){
+    $('newsUpd').textContent = `Couldn't refresh (${e.message}) · retrying`;
+    if(!allNews.length && (newsTab==='top'||newsTab==='latest')) $('news').innerHTML = `<div class="empty">News error: ${esc(e.message)} — try the Live wire tab.</div>`;
+  }
 }
 async function showCompanyNews(){
   const a = selected;
@@ -547,7 +624,9 @@ async function showCompanyNews(){
 function setNewsTab(btn){
   document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on', b===btn));
   newsTab = btn.dataset.n; $('news').scrollTop = 0;
-  if(newsTab==='top') showTop(); else if(newsTab==='latest') showLatest(); else if(newsTab==='company') showCompanyNews(); else aiBrief();
+  if(newsTab==='top') showTop(); else if(newsTab==='latest') showLatest(); else if(newsTab==='company') showCompanyNews();
+  else if(newsTab==='wire') tvWidget($('news'), 'embed-widget-timeline.js', {feedMode:'market', market:'stock', colorTheme:'dark', isTransparent:true, displayMode:'regular', width:'100%', height:'100%', locale:'en'});
+  else aiBrief();
 }
 
 /* ================= AI BRIEF ================= */
@@ -589,21 +668,21 @@ function tickClock(){
 }
 
 /* ================= SETTINGS / START ================= */
-function openSettings(){ const k=keys(); $('kFinn').value=k.finn; $('kGem').value=k.gem; $('kModel').value=k.model; $('settings').classList.add('open'); }
+function openSettings(){ const k=keys(); $('kFinn').value=k.finn; $('kGem').value=k.gem; $('kModel').value=k.model; $('kTd').value=k.td; $('settings').classList.add('open'); }
 function closeSettings(){ $('settings').classList.remove('open'); }
-function saveSettings(){ store('finnKey',$('kFinn').value.trim()); store('gemKey',$('kGem').value.trim()); store('gemModel',$('kModel').value.trim()||'gemini-flash-latest'); closeSettings(); start(); }
+function saveSettings(){ store('finnKey',$('kFinn').value.trim()); store('gemKey',$('kGem').value.trim()); store('gemModel',$('kModel').value.trim()||'gemini-flash-latest'); store('tdKey',$('kTd').value.trim()); closeSettings(); start(); }
 let started = false;
 function start(){
-  if(!keys().finn){ openSettings(); return; }
+  if(!keys().finn){ showBackupPanel(true); openSettings(); return; }
   connect(); loadQuotes(); loadNews(); select(selected.s);
   if(!started){ started = true;
     setInterval(loadNews, 60000);
     setInterval(()=>{ if(newsTab==='top') showTop(); }, 30000); // re-rank as stories age
     setInterval(()=>loadQuotes(), 5*60000); // refresh prev close / day stats
-    setInterval(()=>{ const stale = ASSETS.filter(a=>{ const s=state[a.s]; return !s || !s.price || (!s.lastTick || Date.now()-s.lastTick>90000); }).slice(0,8); if(stale.length) retryQuotes(stale); }, 60000); // REST fallback for symbols without live ticks
+    setInterval(()=>{ const stale = ASSETS.filter(a=>{ if(a.noQuote) return false; const s=state[a.s]; return !s || !s.price || (!s.lastTick || Date.now()-s.lastTick>90000); }).slice(0,6); if(stale.length) retryQuotes(stale); }, 90000); // REST fallback for symbols without live ticks
   }
 }
-renderShell(); setInterval(tickClock, 1000); tickClock(); start();
+renderShell(); tickerTape(); setInterval(tickClock, 1000); tickClock(); start();
 </script>
 </body>
 </html>
